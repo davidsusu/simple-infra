@@ -1,0 +1,20 @@
+[Unit]
+Description={{ service_unit_name }}
+After=network.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+Group={{ app_user }}
+WorkingDirectory={{ app_directory }}
+EnvironmentFile={{ app_directory }}/infra/{{ service_unit_name }}.env
+ExecStart={{ service_command }}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

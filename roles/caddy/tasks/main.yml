@@ -1,0 +1,73 @@
+---
+- name: Inspect any pre-existing root Caddy configuration
+  ansible.builtin.stat:
+    path: /etc/caddy/Caddyfile
+  register: existing_caddyfile
+
+- name: Read existing root configuration
+  ansible.builtin.slurp:
+    src: /etc/caddy/Caddyfile
+  register: existing_caddy_content
+  when: existing_caddyfile.stat.exists
+
+- name: Refuse to replace a Caddy setup not managed by this framework
+  ansible.builtin.assert:
+    that:
+      - "'Managed by simple-infra' in (existing_caddy_content.content | b64decode)"
+    fail_msg: Existing Caddy configuration needs explicit migration before simple-infra can manage it.
+  when: existing_caddyfile.stat.exists
+
+- name: Install Caddy's official stable repository signing key
+  ansible.builtin.get_url:
+    url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+    dest: /etc/apt/keyrings/caddy.asc
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure Caddy's stable APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/simple-infra-caddy.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+      Suites: any-version
+      Components: main
+      Signed-By: /etc/apt/keyrings/caddy.asc
+  register: caddy_repository
+
+- name: Install Caddy without starting the default site
+  ansible.builtin.apt:
+    name: caddy
+    state: present
+    update_cache: "{{ caddy_repository.changed }}"
+    policy_rc_d: 101
+
+- name: Create the per-application site directory
+  ansible.builtin.file:
+    path: /etc/caddy/sites.d
+    state: directory
+    owner: root
+    group: caddy
+    mode: '0755'
+
+- name: Install the shared Caddy configuration
+  ansible.builtin.copy:
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: caddy
+    mode: '0644'
+    content: |
+      # Managed by simple-infra. Applications own their individual site files.
+      import /etc/caddy/sites.d/*.caddy
+    validate: /usr/bin/caddy validate --config %s --adapter caddyfile
+  notify: Reload shared Caddy
+
+- name: Enable and start shared Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    enabled: true
+    state: started

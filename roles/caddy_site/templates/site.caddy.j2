@@ -1,0 +1,6 @@
+# Managed by simple-infra for {{ app_name }}
+{% for host, port in app_http_hosts | dictsort %}
+{{ host }} {
+	reverse_proxy 127.0.0.1:{{ port }}
+}
+{% endfor %}

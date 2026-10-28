@@ -1,0 +1,108 @@
+---
+- name: Inspect this application's existing site registration
+  ansible.builtin.stat:
+    path: "/etc/caddy/sites.d/{{ app_name }}.caddy"
+    follow: false
+  register: previous_site_link
+
+- name: Refuse to replace an unrelated site registration
+  ansible.builtin.assert:
+    that:
+      - >-
+        not previous_site_link.stat.exists or
+        (previous_site_link.stat.islnk | default(false) and
+         previous_site_link.stat.lnk_source == app_directory + '/infra/site.caddy')
+    fail_msg: The site name is already owned by a different configuration; migrate it explicitly.
+
+- name: Find other registered sites
+  ansible.builtin.find:
+    paths: /etc/caddy/sites.d
+    patterns: '*.caddy'
+    excludes: "{{ app_name }}.caddy"
+    file_type: any
+  register: other_site_files
+
+- name: Read other sites for combined configuration validation
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ other_site_files.files }}"
+  register: other_sites
+
+- name: Allocate a candidate configuration outside the live import directory
+  ansible.builtin.tempfile:
+    state: file
+    path: /etc/caddy
+    suffix: .candidate
+  register: caddy_candidate
+  changed_when: false
+
+- name: Validate and commit the site as a transaction
+  block:
+    - name: Validate all existing sites with the proposed replacement
+      ansible.builtin.copy:
+        content: |
+          {{ other_sites.results | map(attribute='content') | map('b64decode') | join('\n') }}
+          {{ lookup('ansible.builtin.template', 'site.caddy.j2') }}
+        dest: "{{ caddy_candidate.path }}"
+        mode: '0600'
+        validate: /usr/bin/caddy validate --config %s --adapter caddyfile
+      changed_when: false
+
+    - name: Render this application's own site
+      ansible.builtin.template:
+        src: site.caddy.j2
+        dest: "{{ app_directory }}/infra/site.caddy"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: true
+      register: caddy_site_file
+
+    - name: Register this application's site
+      ansible.builtin.file:
+        src: "{{ app_directory }}/infra/site.caddy"
+        dest: "/etc/caddy/sites.d/{{ app_name }}.caddy"
+        state: link
+        owner: root
+        group: root
+      register: caddy_site_link
+
+    - name: Reload Caddy after a site change
+      ansible.builtin.systemd_service:
+        name: caddy
+        state: reloaded
+      when: caddy_site_file.changed or caddy_site_link.changed
+  rescue:
+    - name: Restore the previous site file if a replacement was written
+      ansible.builtin.copy:
+        src: "{{ caddy_site_file.backup_file }}"
+        dest: "{{ app_directory }}/infra/site.caddy"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      when: caddy_site_file.backup_file is defined
+
+    - name: Remove a newly created registration after a failed commit
+      ansible.builtin.file:
+        path: "/etc/caddy/sites.d/{{ app_name }}.caddy"
+        state: absent
+      when: not previous_site_link.stat.exists
+
+    - name: Remove a new site file if it has no previous version
+      ansible.builtin.file:
+        path: "{{ app_directory }}/infra/site.caddy"
+        state: absent
+      when:
+        - caddy_site_file.changed | default(false)
+        - caddy_site_file.backup_file is not defined
+
+    - name: Report the failed configuration update
+      ansible.builtin.fail:
+        msg: "Caddy update failed; the previous site registration was preserved/restored. {{ ansible_failed_result.msg | default('See previous task output') }}"
+  always:
+    - name: Remove the candidate configuration
+      ansible.builtin.file:
+        path: "{{ caddy_candidate.path }}"
+        state: absent
+      changed_when: false

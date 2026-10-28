@@ -1,0 +1,4 @@
+---
+# Opt-in shared feature: the first HTTP application installs/starts Caddy.
+dependencies:
+  - role: caddy

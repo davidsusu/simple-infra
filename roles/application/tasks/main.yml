@@ -1,0 +1,89 @@
+---
+- name: Inspect an existing account before claiming the application identity
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ app_user }}"
+    fail_key: false
+
+- name: Refuse to repurpose an unrelated Unix account
+  ansible.builtin.assert:
+    that:
+      - >-
+        ansible_facts.getent_passwd[app_user] == none or
+        (ansible_facts.getent_passwd[app_user][4] == app_directory and
+         ansible_facts.getent_passwd[app_user][5] == '/usr/sbin/nologin')
+    fail_msg: The derived application username already belongs to an unrelated account.
+
+- name: Create the application group
+  ansible.builtin.group:
+    name: "{{ app_user }}"
+    system: true
+
+- name: Create the non-login application service account
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    group: "{{ app_user }}"
+    system: true
+    create_home: false
+    home: "{{ app_directory }}"
+    shell: /usr/sbin/nologin
+    password: '!'
+    update_password: on_create
+    password_lock: true
+
+- name: Create the framework and application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /srv/apps
+    - "{{ infra_registry_directory }}"
+    - "{{ app_directory }}"
+    - "{{ app_directory }}/infra"
+    - "{{ app_directory }}/releases"
+    - "{{ app_directory }}/releases/{{ app_source_digest }}"
+
+- name: Reserve the application's domains and ports
+  ansible.builtin.copy:
+    content: "{{ {'name': app_name, 'domains': app_domains, 'ports': app_http_ports} | to_json }}\n"
+    dest: "{{ infra_registry_directory }}/{{ app_name }}.json"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Upload the deterministic source bundle
+  ansible.builtin.copy:
+    src: "{{ app_source_archive }}"
+    dest: "{{ app_directory }}/infra/source.tar"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Extract a new source release
+  ansible.builtin.unarchive:
+    src: "{{ app_directory }}/infra/source.tar"
+    dest: "{{ app_directory }}/releases/{{ app_source_digest }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ app_directory }}/releases/{{ app_source_digest }}.complete"
+
+- name: Mark the source release as complete
+  ansible.builtin.copy:
+    content: "{{ app_source_digest }}\n"
+    dest: "{{ app_directory }}/releases/{{ app_source_digest }}.complete"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Select the source release without retaining deleted source files
+  ansible.builtin.file:
+    src: "{{ app_directory }}/releases/{{ app_source_digest }}"
+    dest: "{{ app_directory }}/src"
+    state: link
+    owner: root
+    group: root
+  register: app_source_link

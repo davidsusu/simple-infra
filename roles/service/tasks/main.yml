@@ -1,0 +1,59 @@
+---
+- name: Validate the application's service definition
+  ansible.builtin.assert:
+    that:
+      - service_command is defined
+      - service_command is string
+      - service_command.startswith('/')
+      - "'\n' not in service_command"
+      - service_suffix is match('^([a-z][a-z0-9-]{0,25})?$')
+      - service_environment is mapping
+
+- name: Define service identity and environment
+  ansible.builtin.set_fact:
+    service_unit_name: "{{ app_user }}{{ '-' + service_suffix if service_suffix else '' }}"
+    service_effective_environment: "{{ app_environment | combine(service_environment) }}"
+
+- name: Validate derived environment assignments
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[A-Za-z_][A-Za-z0-9_]*$')
+      - item.value is string
+      - "'\u0000' not in item.value"
+  loop: "{{ service_effective_environment | dict2items }}"
+  no_log: true
+
+- name: Write the service environment
+  ansible.builtin.template:
+    src: service.env.j2
+    dest: "{{ app_directory }}/infra/{{ service_unit_name }}.env"
+    owner: root
+    group: "{{ app_user }}"
+    mode: '0640'
+  register: service_env_file
+  no_log: true
+
+- name: Write the application-owned systemd unit
+  ansible.builtin.template:
+    src: service.service.j2
+    dest: "{{ app_directory }}/infra/{{ service_unit_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  register: service_unit_file
+
+- name: Register the unit with systemd
+  ansible.builtin.file:
+    src: "{{ app_directory }}/infra/{{ service_unit_name }}.service"
+    dest: "/etc/systemd/system/{{ service_unit_name }}.service"
+    state: link
+    owner: root
+    group: root
+  register: service_unit_link
+
+- name: Start the service and restart only when its inputs changed
+  ansible.builtin.systemd_service:
+    name: "{{ service_unit_name }}"
+    enabled: true
+    daemon_reload: "{{ service_unit_file.changed or service_unit_link.changed }}"
+    state: "{{ 'restarted' if (app_source_link.changed or service_env_file.changed or service_unit_file.changed or service_unit_link.changed) else 'started' }}"

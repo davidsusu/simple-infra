@@ -1,0 +1,57 @@
+---
+- name: Deploy the application through its declared contract
+  hosts: deployment_target
+  become: true
+  become_method: sudo
+  become_user: root
+  gather_facts: true
+  vars:
+    infra_registry_directory: /var/lib/simple-infra/apps
+  pre_tasks:
+    - name: Validate the target platform
+      ansible.builtin.import_tasks: tasks/validate.yml
+    - name: Verify privilege escalation before making changes
+      ansible.builtin.command: id -u
+      register: deployment_uid
+      changed_when: false
+      failed_when: deployment_uid.stdout != '0'
+    - name: Check application domain and port ownership
+      ansible.builtin.import_tasks: tasks/ownership.yml
+  roles:
+    - base
+  tasks:
+    - name: Install Docker if requested
+      ansible.builtin.include_role:
+        name: docker
+      when: "'docker' in app_features"
+    - name: Prepare the application's account, files and environment
+      ansible.builtin.include_role:
+        name: application
+    - name: Run the application's own installation tasks
+      ansible.builtin.include_tasks: "{{ app_install_tasks }}"
+    - name: Publish HTTP domains through the shared HTTPS frontend
+      ansible.builtin.include_role:
+        name: caddy_site
+      when: "'caddy' in app_features"
+    - name: Apply shared configuration before checking public endpoints
+      ansible.builtin.meta: flush_handlers
+    - name: Check HTTPS for every configured domain from the controller
+      ansible.builtin.uri:
+        url: "https://{{ item }}/"
+        status_code: 200
+        validate_certs: true
+      delegate_to: localhost
+      become: false
+      register: https_result
+      until: https_result.status | default(0) == 200
+      retries: 12
+      delay: 5
+      loop: "{{ app_domains }}"
+    - name: Check HTTP redirects to HTTPS
+      ansible.builtin.uri:
+        url: "http://{{ item }}/"
+        follow_redirects: none
+        status_code: 308
+      delegate_to: localhost
+      become: false
+      loop: "{{ app_domains }}"

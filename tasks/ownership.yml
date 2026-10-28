@@ -1,0 +1,54 @@
+---
+- name: Check whether this host has application registrations
+  ansible.builtin.stat:
+    path: "{{ infra_registry_directory }}"
+  register: app_registry
+
+- name: Find existing application registrations
+  ansible.builtin.find:
+    paths: "{{ infra_registry_directory }}"
+    patterns: '*.json'
+  register: app_registrations
+  when: app_registry.stat.exists
+
+- name: Read other applications' registrations
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ app_registrations.files | default([]) }}"
+  when: (item.path | basename) != app_name + '.json'
+  register: other_applications
+
+- name: Reject domain or backend port collisions
+  ansible.builtin.assert:
+    that:
+      - app_domains | intersect(existing.domains) | length == 0
+      - app_http_ports | intersect(existing.ports | default([existing.port] if existing.port | default(none) != none else [])) | length == 0
+    fail_msg: "Domain or backend port is already reserved by {{ existing.name }}."
+  vars:
+    existing: "{{ item.content | b64decode | from_json }}"
+  loop: "{{ other_applications.results | default([]) }}"
+  when: not item.skipped | default(false)
+
+- name: Inspect this application's previous reservation
+  ansible.builtin.stat:
+    path: "{{ infra_registry_directory }}/{{ app_name }}.json"
+  register: own_reservation
+
+- name: Read the previous reservation
+  ansible.builtin.slurp:
+    src: "{{ infra_registry_directory }}/{{ app_name }}.json"
+  register: own_reservation_content
+  when: own_reservation.stat.exists
+
+- name: Require a newly claimed backend port to be unused
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ item }}"
+    state: stopped
+    timeout: 1
+    msg: The requested backend port is already in use by an unregistered service.
+  loop: "{{ app_http_ports }}"
+  vars:
+    previous: "{{ (own_reservation_content.content | b64decode | from_json) if own_reservation.stat.exists else {} }}"
+    previous_ports: "{{ previous.ports | default([previous.port] if previous.port | default(none) != none else []) }}"
+  when: item not in previous_ports

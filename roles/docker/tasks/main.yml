@@ -1,0 +1,53 @@
+---
+- name: Read installed packages
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Require a host without conflicting distribution Docker packages
+  ansible.builtin.assert:
+    that:
+      - >-
+        ansible_facts.packages.keys() | intersect(
+        ['docker.io', 'docker-compose', 'docker-doc', 'docker-buildx',
+         'podman-docker', 'containerd', 'runc']) | length == 0
+    fail_msg: Remove or migrate conflicting Docker/containerd packages before deploying; this role does not remove them automatically.
+
+- name: Install Docker's official repository signing key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure Docker's stable APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/simple-infra-docker.sources
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      Types: deb
+      URIs: https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+      Suites: {{ ansible_facts['distribution_release'] }}
+      Components: stable
+      Architectures: {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}
+      Signed-By: /etc/apt/keyrings/docker.asc
+  register: docker_repository
+
+- name: Install Docker Engine and Compose
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: "{{ docker_repository.changed }}"
+
+- name: Enable and start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started

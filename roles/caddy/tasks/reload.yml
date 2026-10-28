@@ -1,0 +1,16 @@
+---
+- name: Validate the combined Caddy configuration before reload
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/caddy
+      - validate
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+  changed_when: false
+
+- name: Reload Caddy without stopping the shared service
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: reloaded
