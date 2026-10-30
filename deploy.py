@@ -73,7 +73,7 @@ def load_config(path):
     require(source.is_dir(), f"Source directory does not exist: {source}")
     install = path.parent / "install.yml"
     require(install.is_file(), f"Missing application task list: {install}")
-    key = server.get("ssh_key")
+    key = os.environ.get("SIMPLE_INFRA_SSH_KEY", server.get("ssh_key"))
     if key is not None:
         require(isinstance(key, str) and key, "server.ssh_key must be a path")
         key = Path(key).expanduser()
@@ -133,8 +133,16 @@ def main(argv=None):
     parser.add_argument("config", type=Path)
     parser.add_argument("--validate", action="store_true", help="Validate config and source locally; no SSH or password prompt")
     parser.add_argument("--syntax-check", action="store_true", help="Ansible syntax check without SSH or password prompt")
+    parser.add_argument("--non-interactive", action="store_true", help="Require a sudo password file and disable SSH prompts")
     args = parser.parse_args(argv)
     try:
+        password_file = os.environ.get("SIMPLE_INFRA_BECOME_PASSWORD_FILE")
+        if password_file:
+            password_file = Path(password_file).expanduser().resolve()
+            require(password_file.is_file(), "Sudo password file does not exist")
+            require(password_file.stat().st_mode & 0o077 == 0, "Sudo password file must not be accessible to group/others")
+        if args.non_interactive:
+            require(password_file is not None, "Non-interactive deployment requires SIMPLE_INFRA_BECOME_PASSWORD_FILE")
         values = load_config(args.config)
         with tempfile.TemporaryDirectory(prefix="simple-infra-") as directory:
             directory = Path(directory)
@@ -149,6 +157,8 @@ def main(argv=None):
                 'ansible_port': values.pop('ssh_port'), 'ansible_connection': 'ssh',
                 'ansible_ssh_common_args': '-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o StrictHostKeyChecking=yes',
             }}}}
+            if args.non_interactive:
+                inventory['all']['hosts']['deployment_target']['ansible_ssh_common_args'] += ' -o BatchMode=yes -o IdentitiesOnly=yes'
             key = values.pop('ssh_key')
             if key:
                 inventory['all']['hosts']['deployment_target']['ansible_ssh_private_key_file'] = key
@@ -160,7 +170,12 @@ def main(argv=None):
             require(executable is not None, "Install simple-infra/requirements.txt in this Python environment")
             command = [executable, '-i', str(directory/'inventory.yml'), str(ROOT/'site.yml'),
                        '-e', '@'+str(directory/'vars.yml')]
-            command.append('--syntax-check' if args.syntax_check else '--ask-become-pass')
+            if args.syntax_check:
+                command.append('--syntax-check')
+            elif password_file:
+                command.extend(['--become-password-file', str(password_file)])
+            else:
+                command.append('--ask-become-pass')
             env = dict(os.environ, ANSIBLE_CONFIG=str(ROOT/'ansible.cfg'))
             return subprocess.run(command, env=env, cwd=ROOT).returncode
     except (ValueError, OSError, yaml.YAMLError) as error:

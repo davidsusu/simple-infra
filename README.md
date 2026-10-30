@@ -9,7 +9,7 @@ No application-specific inventory, role tree, Ansible configuration, or playbook
 Use an existing **non-root SSH account with password-protected sudo**.
 The framework never creates or edits this account, its password, SSH keys or sudoers.
 SSH uses your key/agent.
-Every real deployment asks for the sudo password using Ansible's `--ask-become-pass`.
+By default, every real deployment asks for the sudo password using Ansible's `--ask-become-pass`.
 No password is stored in the config or passed in command arguments.
 An encrypted SSH key should be loaded into `ssh-agent` first.
 
@@ -87,7 +87,7 @@ Unicode, quotes, dollar signs, literal `{{ ... }}` and multiline strings are pre
 The generated files use systemd EnvironmentFile quoting, not shell expansion.
 They are root-owned, mode 0640, readable by the application's group.
 Do not `source` them in a shell.
-Vault/CI secret integration is not part of this manual version.
+Vault integration is not included; CI authentication is described below.
 
 ## Application task contract
 
@@ -157,3 +157,14 @@ Application directories are not a security sandbox; install tasks are trusted co
 Packages use `state: present`: install the current package initially, without implicitly upgrading everything on every deploy.
 Existing conflicting Docker packages and unrelated service accounts need explicit migration.
 A new config is not a mechanism for changing the SSH account's password.
+
+## Non-interactive deployment
+
+Local invocations keep interactive sudo authentication by default.
+For automation, set `SIMPLE_INFRA_SSH_KEY` to a private-key file to override `server.ssh_key`.
+Set `SIMPLE_INFRA_BECOME_PASSWORD_FILE` to an existing, owner-only password file (mode 0600) and pass `--non-interactive`.
+The launcher passes the filename to Ansible's `--become-password-file`; the password itself is never placed in command arguments or generated inventory.
+Non-interactive mode requires that file and enables SSH BatchMode and IdentitiesOnly.
+Host-key verification remains enabled: provision a verified `known_hosts` file before deployment.
+The caller owns the credential files and must remove them after use, including on failure.
+Keep secret values in your CI secret store, never in the repository.
